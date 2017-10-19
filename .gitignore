@@ -54,3 +54,6 @@ docs/_build
 /.hope/
 /.ipynb_checkpoints/
 /.settings/
+
+# demo
+unet_trained

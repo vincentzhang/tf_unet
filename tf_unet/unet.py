@@ -180,11 +180,14 @@ class Unet(object):
         tf.reset_default_graph()
         
         self.n_class = n_class
+        
         self.summaries = kwargs.get("summaries", True)
         
         self.x = tf.placeholder("float", shape=[None, None, None, channels])
         self.y = tf.placeholder("float", shape=[None, None, None, n_class])
         self.keep_prob = tf.placeholder(tf.float32) #dropout (keep probability)
+       
+        #import pdb;pdb.set_trace() 
         
         logits, self.variables, self.offset = create_conv_net(self.x, self.keep_prob, channels, n_class, **kwargs)
         
@@ -252,12 +255,15 @@ class Unet(object):
         :param x_test: Data to predict on. Shape [n, nx, ny, channels]
         :returns prediction: The unet prediction Shape [n, px, py, labels] (px=nx-self.offset/2) 
         """
-        
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth=True
+        # allow the gpu memory to grow such that it doesn't take all the memory
+
         init = tf.global_variables_initializer()
-        with tf.Session() as sess:
+        with tf.Session(config=config) as sess:
             # Initialize variables
             sess.run(init)
-        
+
             # Restore model weights from previously saved model
             self.restore(sess, model_path)
             
@@ -303,7 +309,8 @@ class Trainer(object):
     """
     
     prediction_path = "prediction"
-    verification_batch_size = 4
+    #verification_batch_size = 4
+    verification_batch_size = 1
     
     def __init__(self, net, batch_size=1, norm_grads=False, optimizer="momentum", opt_kwargs={}):
         self.net = net
@@ -367,11 +374,11 @@ class Trainer(object):
         if not os.path.exists(prediction_path):
             logging.info("Allocating '{:}'".format(prediction_path))
             os.makedirs(prediction_path)
-        
+
         if not os.path.exists(output_path):
             logging.info("Allocating '{:}'".format(output_path))
             os.makedirs(output_path)
-        
+
         return init
 
     def train(self, data_provider, output_path, training_iters=10, epochs=100, dropout=0.75, display_step=1, restore=False, write_graph=False):
@@ -390,10 +397,13 @@ class Trainer(object):
         save_path = os.path.join(output_path, "model.cpkt")
         if epochs == 0:
             return save_path
-        
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth=True
+        # allow the gpu memory to grow such that it doesn't take all the memory
+
         init = self._initialize(training_iters, output_path, restore)
-        
-        with tf.Session() as sess:
+
+        with tf.Session(config=config) as sess:
             if write_graph:
                 tf.train.write_graph(sess.graph_def, output_path, "graph.pb", False)
             
@@ -404,8 +414,8 @@ class Trainer(object):
                 if ckpt and ckpt.model_checkpoint_path:
                     self.net.restore(sess, ckpt.model_checkpoint_path)
             
-            test_x, test_y = data_provider(self.verification_batch_size)
-            pred_shape = self.store_prediction(sess, test_x, test_y, "_init")
+#            test_x, test_y = data_provider(self.verification_batch_size)
+#            pred_shape = self.store_prediction(sess, test_x, test_y, "_init")
             
             summary_writer = tf.summary.FileWriter(output_path, graph=sess.graph)
             logging.info("Start optimization")
@@ -415,7 +425,12 @@ class Trainer(object):
                 total_loss = 0
                 for step in range((epoch*training_iters), ((epoch+1)*training_iters)):
                     batch_x, batch_y = data_provider(self.batch_size)
-                     
+
+                    prediction = sess.run(self.net.predicter, feed_dict={self.net.x: batch_x, 
+                                                             self.net.y: batch_y, 
+                                                             self.net.keep_prob: 1.})
+                    pred_shape = prediction.shape
+                    #import pdb;pdb.set_trace() 
                     # Run optimization op (backprop)
                     _, loss, lr, gradients = sess.run((self.optimizer, self.net.cost, self.learning_rate_node, self.net.gradients_node), 
                                                       feed_dict={self.net.x: batch_x,
@@ -433,7 +448,7 @@ class Trainer(object):
                     total_loss += loss
 
                 self.output_epoch_stats(epoch, total_loss, training_iters, lr)
-                self.store_prediction(sess, test_x, test_y, "epoch_%s"%epoch)
+                #self.store_prediction(sess, test_x, test_y, "epoch_%s"%epoch)
                     
                 save_path = self.net.save(sess, save_path)
             logging.info("Optimization Finished!")

@@ -16,10 +16,11 @@ author: jakeret
 '''
 from __future__ import print_function, division, absolute_import, unicode_literals
 
-#import cv2
 import glob
 import numpy as np
 from PIL import Image
+import h5py
+import os
 
 class BaseDataProvider(object):
     """
@@ -50,7 +51,7 @@ class BaseDataProvider(object):
         labels = self._process_labels(label)
         
         train_data, labels = self._post_process(train_data, labels)
-        
+        #import pdb;pdb.set_trace() 
         nx = data.shape[1]
         ny = data.shape[0]
 
@@ -193,4 +194,144 @@ class ImageDataProvider(BaseDataProvider):
         img = self._load_file(image_name, np.float32)
         label = self._load_file(label_name, np.bool)
     
+        return img,label
+
+class HDF5DataProvider(BaseDataProvider):
+    """
+    Data provider for hdf5 images, supports gray scale and colored images.
+    Assumes that the data images and label images are stored in the same folder
+    and that the labels have a different file suffix 
+    e.g. 'train/fish_1.tif' and 'train/fish_1_mask.tif'
+
+    Usage:
+    data_provider = HDF5DataProvider("/data/dataset/hip/abhi")
+        
+    :param search_path: a glob search pattern to find all data and label images
+    :param a_min: (optional) min value used for clipping
+    :param a_max: (optional) max value used for clipping
+    :param data_suffix: suffix pattern for the data images. Default '.tif'
+    :param mask_suffix: suffix pattern for the label images. Default '_mask.tif'
+    :param shuffle_data: if the order of the loaded file path should be randomized. Default 'True'
+    :param channels: (optional) number of channels, default=1
+    :param n_class: (optional) number of classes, default=2
+    
+    """
+    
+    def __init__(self, search_path, a_min=None, a_max=None, data_suffix=".h5",
+                    mask_suffix='_mask.h5', split="train", flip=True,
+                    use_empty=False,
+                    mean=34.1311, shuffle_data=True, n_class = 2):
+        super(HDF5DataProvider, self).__init__(a_min, a_max)
+        self.data_suffix = data_suffix
+        self.mask_suffix = mask_suffix
+        self.file_idx = -1
+        self.shuffle_data = shuffle_data
+        self.n_class = n_class
+        self.data_dir = search_path
+        self.split = split
+        self.flip = flip
+        self.mean = mean
+
+        # handle to the data/label h5 files
+        self._image_h5f = h5py.File(os.path.join(self.data_dir,
+            'seg_band.h5'), 'r')
+        self._label_h5f = h5py.File(os.path.join(self.data_dir,
+            'seg_band_mask.h5'), 'r')
+
+        # load indices for images and labels, train or val
+        split_f  = '{}/{}.txt'.format(self.data_dir, self.split)
+        # h5 indexed by the volume names
+        self._vol_names = open(split_f, 'r').read().splitlines()
+        self.use_empty = use_empty
+
+        self.indices = self._load_image_set_index() # a list of image indices
+
+        if self.flip:
+            self.indices = 2*self.indices
+            #import pdb;pdb.set_trace()
+            for i in range(int(len(self.indices)/2), len(self.indices)):
+                self.indices[i] = self.indices[i] +'_flip'
+
+        
+        if self.shuffle_data:
+            np.random.shuffle(self.indices)
+        
+        assert len(self.indices) > 0, "No training files"
+        print("Number of files used: %s" % len(self.indices))
+        
+        img = self._load_file(0)
+        self.channels = 1 if len(img.shape) == 2 else img.shape[-1]
+
+
+    def _load_image_set_index(self):
+        """
+        Load a list of indexes listed in this dataset's image set file.
+        Format: volname_sliceidx
+        """
+        image_index = []
+        for name in self._vol_names:
+            bbox_file = os.path.join(self.data_dir, 'seg_band_bbox',
+                    name+'_bbox.txt')
+            assert os.path.exists(bbox_file), \
+                    'bbox path does not exist: {}'.format(bbox_file)
+            with open(bbox_file) as fbbox:
+                if self.use_empty:
+                    vol_index = [x.strip().split(',')[0] for x in fbbox.readlines()]
+                else:
+                    vol_index = [x.strip().split(',')[0] for x in fbbox.readlines() if x.strip().split(',')[1]!='0']
+
+            image_index += vol_index
+
+        return image_index
+
+
+    def _load_file(self, idx, dtype=np.float32, data_type='img'):
+        img_flip = False
+        if not self.flip:
+            vol_name, sliceidx = self.indices[idx].rsplit('_',1)
+        else:
+            split_str = self.indices[idx].split('_')
+            vol_name = split_str[0] + '_' + split_str[1]
+            sliceidx = split_str[2]
+            if len(split_str) > 3:
+                # with flip
+                img_flip = True
+
+        sliceidx = int(sliceidx)
+        #import pdb;pdb.set_trace()
+        if data_type == 'img':
+            im = np.array(self._image_h5f[vol_name][:,:,sliceidx],
+                dtype=dtype)
+            im -= self.mean
+        else:
+            im = np.array(self._label_h5f[vol_name+'_mask'][:,:,sliceidx],
+                dtype=dtype)
+
+        if img_flip:
+            im = im[:, ::-1] # flip it 
+        # stack to 3 channels
+        #in_ = np.dstack((im, im, im))
+        #in_ = in_.transpose((2,0,1))
+        return im
+
+    def _process_data(self, data):
+        return data
+
+    def _cylce_file(self):
+        """ return the index of the file """
+        self.file_idx += 1
+        if self.file_idx >= len(self.indices):
+            self.file_idx = 0 
+            if self.shuffle_data:
+                np.random.shuffle(self.indices)
+
+    def _next_data(self):
+        self._cylce_file()
+        #image_name = self.data_files[self.file_idx]
+        #label_name = image_name.replace(self.data_suffix, self.mask_suffix)
+
+        img = self._load_file(self.file_idx, np.float32)
+        label = self._load_file(self.file_idx, np.bool, 'label')
+           # import pdb;pdb.set_trace()
+
         return img,label
